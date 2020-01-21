@@ -81,15 +81,88 @@ def whichphase(PT, path=defpath):
                                 PT = np.array([P, T])
     :param path:    an optional path to the SeaFreeze_Gibbs.mat file --
                     default value assumes the spline distributed along with the project
-    :return:        A numpy.ndarray the same size as PT, with the phase of each pressure/temperature represented by
-                    an integer, as shown in phasenum2phase
+    :return:        A numpy.ndarray the same size as PT, where each row corresponds to a pressure,
+                    and each column to a temperature.  The phase of each pressure/temperature point is
+                    represented by an integer, as shown in phasenum2phase.
+
     """
     isscatter = _is_scatter(PT)
-    phase_sp = {v.phase_num: load.loadSpline(path, v.sp_name) for v in phases.values() if not np.isnan(v.phase_num)}
-    ptsh = ((PT.size,) if isscatter else (PT[0].size, PT[1].size))      # reference shape based on PT
-    comp = np.full(ptsh + (max_phase_num+1,), np.nan)                   # comparison matrix
+    phase_sp = _get_phase_splines(phases.values(), path)
+    return _which_phase_internal(isscatter, phase_sp, PT, path)
+
+
+def get_transition_line(reqph, prec=3, path=defpath):
+    """
+    Identifies the phase transition between two phases, to a given level of resolution, in terms of
+    the pressure and temperature points at which one phase becomes more stable than the other.
+    Only the P/T regimes where the two phases are contiguously the most stable of the supported
+    phases are included in the output.
+
+    :param reqph:       A list of length 2 indicating the phases for which the transition should be identified.
+                        Values must be expressed as two distinct keys of the phases dict.
+    :param prec:        Indicates the number of decimal places to which the pressure and temperatures
+                        corresponding to the phase transition.  In other words, the output values
+                        will be specified to precision corresponding to 10^-prec.
+                        Accepted values range from 0 to 7.
+                        Float values are accepted.  For example, prec=2.3 will result in getting values down
+                        to ~ the nearest 0.005.
+    :param path:        an optional path to the SeaFreeze_Gibbs.mat file --
+                        default value assumes the spline distributed along with the project
+    :return:            A list of 2-tuples indicating the (P,T) points corresponding to the transition
+                        between the specified phases, if any.  Both pressure (P, in MPa) and
+                        temperature (T, in K) will be specified to the requested precision.
+                        The list will be empty if there is no phase boundary between the specified phases.
+    """
+    # check prec values
+    if prec > 7 or prec < 0:
+        raise ValueError('Unsupported precision')
+    # confirm only 2 phases are requested and that all are supported
+    if len(reqph) != 2 or len([r for r in reqph if r in phases and not np.isnan(phases[r].phase_num)]) != 2:
+        sp = [p for p in phases.keys() if not np.isnan(phases[p].phase_num)]
+        raise ValueError('Parameter reqph should be two values, both from supported values '+str(sp))
+    phasesn = sorted([phases[p].phase_num for p in reqph]) # phase numbers to match with output
+    # get smallest P and T ranges supported by both phases
+    phase_sp = _get_phase_splines(phases.values(), path)
+    getRangeFromKnots = lambda idx: [(phase_sp[sp]['knots'][idx][0], phase_sp[sp]['knots'][idx][-1])
+                                     for sp in phase_sp.keys() if sp in phasesn]
+    Prange = getRangeFromKnots(iP)
+    Trange = getRangeFromKnots(iT)
+    # initialize PT to appropriate precision for both P and T
+    P = np.arange(max([pr[0] for pr in Prange]), min([pr[1] for pr in Prange])+1)
+    T = np.arange(max([tr[0] for tr in Trange]), min([tr[1] for tr in Trange])+1)
+    ptgrids = [np.array([P,T])]
+    # iterate over increasing levels of precision
+    isTransitionPt = lambda pnp: pnp[0] in phasesn and pnp[1] in phasesn and pnp[0] != pnp[1]
+    getGridRange = lambda D, i, ngc, s, ns: np.arange(D[ngc[i]], D[ngc[i]] + s + ns, ns)
+    getPt = lambda D, i, ngc: D[ngc[i]]
+    for pr in np.arange(0, prec+1):
+        nextgrids = []
+        nextstep = 10 ** float(((pr + 1) * -1))
+        step = 10 ** float(pr * -1)
+        for pt in ptgrids:
+            # get phases for each cell on P/T grid (first time through will be a grid, the other times will be scatter)
+            phdiag = _which_phase_internal(False, phase_sp, pt, path)
+            # for each P, find phase transitions between one temperature and the next
+            ptranspt = list(np.where(np.apply_along_axis(isTransitionPt, 2, np.dstack((phdiag[:, :-1], phdiag[:, 1:])))))
+            # for each T, find phase transitions between one pressure and the next
+            ttranspt = list(np.where(np.apply_along_axis(isTransitionPt, 2, np.dstack((phdiag[:-1, :], phdiag[1:, :])))))
+            # each (P,T) point will serve as the lower left corner of a new grid to be checked at the next level of precision
+            nextgridcorners = sorted({(pi, ti) for pi, ti in zip(*np.concatenate((ptranspt, ttranspt), 1))})
+            if pr != prec:      # build ptgrids for next iteration
+                nextgrids = nextgrids + [np.array([getGridRange(pt[iP], iP, ngc, step, nextstep),
+                                                   getGridRange(pt[iT], iT, ngc, step, nextstep)]) for ngc in nextgridcorners]
+            else:               # map nextgridcorners for output
+                nextgrids = nextgrids + [(pt[iP][ngc[iP]], pt[iT][ngc[iT]]) for ngc in nextgridcorners]
+        if pr != prec:
+            ptgrids = nextgrids
+    return nextgrids
+
+
+def _which_phase_internal(isscatter, phase_sp, PT, path):
+    ptsh = ((PT.size,) if isscatter else (PT[0].size, PT[1].size))  # reference shape based on PT
+    comp = np.full(ptsh + (max_phase_num + 1,), np.nan)  # comparison matrix
     for p in phase_sp.keys():
-        sl = tuple(repeat(slice(None), 1 if isscatter else 2))+(p,)     # slice for this phase
+        sl = tuple(repeat(slice(None), 1 if isscatter else 2)) + (p,)  # slice for this phase
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             sp = phase_sp[p]
@@ -105,10 +178,13 @@ def whichphase(PT, path=defpath):
             tdvs[extrap] = np.nan
             comp[sl] = tdvs
     # output for all-nan slices should be nan
-    all_nan_sl = np.all(np.isnan(comp), -1)     # find slices where all values are nan along the innermost axis
-    out = np.full(ptsh, np.nan)        # initialize output to nan
-    out[~all_nan_sl] = np.nanargmin(comp[~all_nan_sl],-1)      # find min values for other slices
+    all_nan_sl = np.all(np.isnan(comp), -1)  # find slices where all values are nan along the innermost axis
+    out = np.full(ptsh, np.nan)  # initialize output to nan
+    out[~all_nan_sl] = np.nanargmin(comp[~all_nan_sl], -1)  # find min values for other slices
     return out
+
+def _get_phase_splines(phases2load, path):
+    return {v.phase_num: load.loadSpline(path, v.sp_name) for v in phases2load if not np.isnan(v.phase_num)}
 
 
 def _get_tdvs(sp, PT, is_scatter, *tdvSpec):

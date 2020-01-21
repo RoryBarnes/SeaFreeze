@@ -17,9 +17,9 @@ class TestSeafreeze(ut.TestCase):
     # def test_is_scatter_singlept_list1(self):
     #     PT = np.array([(1,2)])
     #     self.assertTrue(sf._is_scatter(PT))
-    # def test_is_scatter_single_grid(self):
-    #     PT = np.array([7, 8])
-    #     self.assertFalse(sf._is_scatter(PT))
+    def test_is_scatter_single_grid(self):
+        PT = np.array([7, 8])
+        self.assertFalse(sf._is_scatter(PT))
     def test_is_scatter_singlept_preallocated(self):
         PT = np.empty((1,), np.object)
         PT[0] = (1, 2)
