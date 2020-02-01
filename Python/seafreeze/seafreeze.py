@@ -1,13 +1,16 @@
 from collections import namedtuple
 from itertools import repeat
+from math import ceil
+from os import path
 import warnings
-import os.path as op
+
 import numpy as np
+
 from mlbspline import load
 from lbftd import evalGibbs as eg
 from lbftd.statevars import iP, iT
 
-defpath = op.join(op.dirname(op.abspath(__file__)), 'SeaFreeze_Gibbs.mat')
+defpath = path.join(path.dirname(path.abspath(__file__)), 'SeaFreeze_Gibbs.mat')
 
 def seafreeze(PT, phase, path=defpath):
     """ Calculates thermodynamic quantities for H2O water or ice polymorphs Ih, III, V, and VI for all phases
@@ -103,9 +106,7 @@ def get_transition_line(reqph, prec=3, path=defpath):
     :param prec:        Indicates the number of decimal places to which the pressure and temperatures
                         corresponding to the phase transition.  In other words, the output values
                         will be specified to precision corresponding to 10^-prec.
-                        Accepted values range from 0 to 7.
-                        Float values are accepted.  For example, prec=2.3 will result in getting values down
-                        to ~ the nearest 0.005.
+                        Accepted values are integers from 0 to 6.  Floats will be treated as ceil(prec).
     :param path:        an optional path to the SeaFreeze_Gibbs.mat file --
                         default value assumes the spline distributed along with the project
     :return:            A list of 2-tuples indicating the (P,T) points corresponding to the transition
@@ -113,49 +114,51 @@ def get_transition_line(reqph, prec=3, path=defpath):
                         temperature (T, in K) will be specified to the requested precision.
                         The list will be empty if there is no phase boundary between the specified phases.
     """
-    # check prec values
-    if prec > 7 or prec < 0:
-        raise ValueError('Unsupported precision')
+    prec = ceil(prec)
+    if prec > 6 or prec < 0:        # check prec values
+        raise ValueError('Unsupported value for parameter prec - choose an integer between 0 and 6')
     # confirm only 2 phases are requested and that all are supported
     if len(reqph) != 2 or len([r for r in reqph if r in phases and not np.isnan(phases[r].phase_num)]) != 2:
-        sp = [p for p in phases.keys() if not np.isnan(phases[p].phase_num)]
-        raise ValueError('Parameter reqph should be two values, both from supported values '+str(sp))
-    phasesn = sorted([phases[p].phase_num for p in reqph]) # phase numbers to match with output
+        raise ValueError('Parameter reqph should be a list of two distinct values from supported phases ' +
+                         str(sorted(phasenum2phase.keys())))
     # get smallest P and T ranges supported by both phases
-    phase_sp = _get_phase_splines(phases.values(), path)
-    getRangeFromKnots = lambda idx: [(phase_sp[sp]['knots'][idx][0], phase_sp[sp]['knots'][idx][-1])
-                                     for sp in phase_sp.keys() if sp in phasesn]
-    Prange = getRangeFromKnots(iP)
-    Trange = getRangeFromKnots(iT)
-    # initialize PT to appropriate precision for both P and T
-    P = np.arange(max([pr[0] for pr in Prange]), min([pr[1] for pr in Prange])+1)
-    T = np.arange(max([tr[0] for tr in Trange]), min([tr[1] for tr in Trange])+1)
-    ptgrids = [np.array([P,T])]
+    phase_sp = _get_phase_splines(phases.values(), path)    # get splines for all phases so whichphase behaves properly
+    phasesn = sorted([phases[p].phase_num for p in reqph])  # phase numbers to match with output
+    Prange = _getRangeFromKnots(iP, phase_sp, phasesn)
+    Trange = _getRangeFromKnots(iT, phase_sp, phasesn)
+    # initialize PT for both P and T (step 1 corresponds to prec=0)
+    P = np.arange(*Prange)
+    T = np.arange(*Trange)
+    ptgrids = [np.array([P, T])]
     # iterate over increasing levels of precision
-    isTransitionPt = lambda pnp: pnp[0] in phasesn and pnp[1] in phasesn and pnp[0] != pnp[1]
-    getGridRange = lambda D, i, ngc, s, ns: np.arange(D[ngc[i]], D[ngc[i]] + s + ns, ns)
-    getPt = lambda D, i, ngc: D[ngc[i]]
-    for pr in np.arange(0, prec+1):
+    for pr in range(prec+1):
         nextgrids = []
-        nextstep = 10 ** float(((pr + 1) * -1))
-        step = 10 ** float(pr * -1)
+        step = 10 ** float(pr * -1)                     # current precision level
         for pt in ptgrids:
-            # get phases for each cell on P/T grid (first time through will be a grid, the other times will be scatter)
+            # get phases for each cell on P/T grid
             phdiag = _which_phase_internal(False, phase_sp, pt, path)
-            # for each P, find phase transitions between one temperature and the next
-            ptranspt = list(np.where(np.apply_along_axis(isTransitionPt, 2, np.dstack((phdiag[:, :-1], phdiag[:, 1:])))))
-            # for each T, find phase transitions between one pressure and the next
-            ttranspt = list(np.where(np.apply_along_axis(isTransitionPt, 2, np.dstack((phdiag[:-1, :], phdiag[1:, :])))))
+            pha = phdiag==phasesn[0]; phb = phdiag==phasesn[1]
+            # for each P (rows), find phase transitions between one temperature and the next (a->b or b->a)
+            pnextt_a2b = _isPhaseTrans(pha, phb, iP)
+            pnextt_b2a = _isPhaseTrans(phb, pha, iP)
+            # for each T (cols), find phase transitions between one pressure and the next (a->b or b->a)
+            tnextp_a2b = _isPhaseTrans(pha, phb, iT)
+            tnextp_b2a = _isPhaseTrans(phb, pha, iT)
+            # tnextp_a2b = list(np.where(np.array(
+            #     [a and b for (pa, pb) in zip(pha[:-1, :], phb[1:, :]) for (a, b) in zip(pa, pb)]).reshape(
+            #     (len(pt[iP])-1, len(pt[iT])))))
+            # tnextp_b2a = list(np.where(np.array(
+            #     [a and b for (pb, pa) in zip(phb[:-1, :], pha[1:, :]) for (a,b) in zip(pa, pb)]
+            # )))
             # each (P,T) point will serve as the lower left corner of a new grid to be checked at the next level of precision
-            nextgridcorners = sorted({(pi, ti) for pi, ti in zip(*np.concatenate((ptranspt, ttranspt), 1))})
-            if pr != prec:      # build ptgrids for next iteration
-                nextgrids = nextgrids + [np.array([getGridRange(pt[iP], iP, ngc, step, nextstep),
-                                                   getGridRange(pt[iT], iT, ngc, step, nextstep)]) for ngc in nextgridcorners]
-            else:               # map nextgridcorners for output
+            nextgridcorners = sorted({(pi, ti) for pi, ti in zip(*np.concatenate((pnextt_a2b, pnextt_b2a, tnextp_a2b, tnextp_b2a), 1))})
+            if pr < prec:      # build ptgrids for next iteration
+                nextgrids = nextgrids + [np.array([_getGridRange(pt, iP, ngc, step, 10),
+                                                   _getGridRange(pt, iT, ngc, step, 10)]) for ngc in nextgridcorners]
+            else:              # map nextgridcorners for output since this is the last prec
                 nextgrids = nextgrids + [(pt[iP][ngc[iP]], pt[iT][ngc[iT]]) for ngc in nextgridcorners]
-        if pr != prec:
-            ptgrids = nextgrids
-    return nextgrids
+        ptgrids = nextgrids
+    return sorted(list(set(nextgrids)))
 
 
 def _which_phase_internal(isscatter, phase_sp, PT, path):
@@ -218,6 +221,48 @@ def _is_scatter(PT):
 
 def _get_T(PT, is_scatter):
     return np.array([T for P,T in PT]) if is_scatter else PT[1]
+
+
+def _getRangeFromKnots(di, phasesp, phasesn):
+    """
+    :param di:          index of the dimension for which the range should be determined
+    :param phasesp:     the splines for the all supported phases
+    :param phasesn:     the subset of phases for which the range should be determined
+    :return:            A tuple with the smallest range of values covered by all phases in phasesn
+                        for the domain represented by parameter di
+    """
+    range = [(phasesp[sp]['knots'][di][0], phasesp[sp]['knots'][di][-1]) for sp in phasesp.keys() if sp in phasesn]
+    return (max([pr[0] for pr in range]), min([pr[1] for pr in range])+1)
+
+
+def _getGridRange(pt, di, grc, inc, steps):
+    """
+
+    :param pt:          the current pt grid
+    :param di:          the index associated with the current dimension
+    :param grc:         the corner of some to-be-evaluated grid of independent values
+    :param inc:         the current increment to the end point of each grid
+    :param steps:       the number of interpolation points
+    :return:
+    """
+    llc = pt[di][grc[di]]  # the value of the lower left corner of the current grid for the specified dimension
+    return np.linspace(llc, llc+inc , steps+1, endpoint=True)
+
+
+def _isPhaseTrans(pha, phb, a):
+    """
+    :param pha:         An ndarray of Boolean values indicating whether the point has phase a (same shape as phb)
+    :param phb:         An ndarray of Boolean values indicating whether the point has phase b (same shape as pha)
+    :param a:           The axis along which to slice (0 to slice along rows, 1 to slice along cols)
+    :return:            A list of indices where the first of two successive points along the selected axis
+                        has phase a, with the next point having phase b
+    """
+    slall = slice(None); sl1 = slice(-1); sl2 = slice(1, None)
+    rows = len(pha[:, 0]); cols = len(pha[0, :])
+    sla = (slall, sl1) if a == 0 else (sl1, slall)
+    slb = (slall, sl2) if a == 0 else (sl2, slall)
+    shp = (rows - (0 if a == 0 else 1), cols - (0 if a == 1 else 1))
+    return list(np.where(np.array([a and b for (pa, pb) in zip(pha[sla], phb[slb]) for (a,b) in zip(pa, pb)]).reshape(shp)))
 
 
 #########################################
