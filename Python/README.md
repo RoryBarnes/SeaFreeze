@@ -148,6 +148,7 @@ out = sf.whichphase(PT)
 ## `seafreeze.get_transition_line`: find the transition between two phases
 
 ### Usage
+Given two phases of water, this function will return a series of pressure and temperature points that marks the phase transition line between the two phases (if any).
 
 ### Example
 
