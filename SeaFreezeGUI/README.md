@@ -22,7 +22,6 @@ a second row containing min, max, and number of points for temperature, followed
 
 ![Metadataexcel](https://user-images.githubusercontent.com/70338087/93945188-48f8cb00-fceb-11ea-8198-e41b602c6764.png)
 
-
 ##### Thermodynamic and Seismic Data 
 All generated data is printed on separate sheets labeled by the sheet name (property (units)). The data matrix presents in the following way: 
 
